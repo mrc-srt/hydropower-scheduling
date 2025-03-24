@@ -1,35 +1,27 @@
-using SDDP, JuMP, HiGHS, Statistics
-
-graph = SDDP.LinearGraph(3)
-
-println("Hello there")
-
-graph = SDDP.UnicyclicGraph(0.95; num_nodes = 3)
-
-model = SDDP.PolicyGraph(
-    graph;
-    sense = :Min,
-    lower_bound = 0.0,
+using SDDP, HiGHS, DataFrames
+realizations = [
+    [(; inflow = rand(24), price = rand(24)) for _ in 1:2]
+    for t in 1:7
+];
+model = SDDP.LinearPolicyGraph(
+    stages = 7,
+    upper_bound = 7 * 24,
+    sense = :Max,
     optimizer = HiGHS.Optimizer,
-) do sp, t
-    @variable(sp, 5 <= x <= 15, SDDP.State, initial_value = 10)
-    @variable(sp, g_t >= 0)
-    @variable(sp, g_h >= 0)
-    @variable(sp, s >= 0)
-    @constraint(sp, balance, x.out - x.in + g_h + s == 0)
-    @constraint(sp, demand, g_h + g_t == 0)
-    @stageobjective(sp, s + t * g_t)
-    SDDP.parameterize(sp, [[0, 7.5], [3, 5], [10, 2.5]]) do w
-        set_normalized_rhs(balance, w[1])
-        return set_normalized_rhs(demand, w[2])
+) do sp, stage
+    @variable(sp, 0 <= x_weekly_volume <= 1, SDDP.State, initial_value = 1)
+    @variable(sp, 0 <= u_volume[1:24] <= 1)
+    @variable(sp, u_discharge[1:24] >= 0)
+    @variable(sp, u_spill[1:24] >= 0)
+    @variable(sp, u_inflow[1:24])
+    @constraint(sp, [h in 1:24],
+        u_volume[h] == (h == 1 ? x_weekly_volume.in : u_volume[h-1]) +
+            u_inflow[h] - u_discharge[h] - u_spill[h]
+    )
+    @constraint(sp, x_weekly_volume.out == u_volume[24])
+    SDDP.parameterize(sp, realizations[stage]) do w
+        fix.(u_inflow, w.inflow)
+        @stageobjective(sp, sum(w.price .* u_discharge))
     end
 end
-
-SDDP.train(model; iteration_limit = 100)
-
-sims = SDDP.simulate(model, 100, [:g_t])
-mu = round(mean([s[1][:g_t] for s in sims]); digits = 2)
-println("On average, $(mu) units of thermal are used in the first stage.")
-
-V = SDDP.ValueFunction(model[1])
-cost, price = SDDP.evaluate(V; x = 10)
+SDDP.train(model)
